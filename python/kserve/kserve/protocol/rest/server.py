@@ -52,6 +52,38 @@ class _NoSignalUvicornServer(uvicorn.Server):
     def install_signal_handlers(self) -> None:
         pass
 
+import json
+import numpy as np
+class BinaryTensorRequest(Request):
+    async def body(self) -> bytes:
+        if hasattr(self, "_body"):
+            return self._body
+        body = await super().body()
+        if 'inference-header-content-length' not in self.headers:
+            self._body = body
+        else:
+            infheadercontlen = int(self.headers['inference-header-content-length'])
+            content = json.loads(body[:infheadercontlen])
+            last = infheadercontlen
+            for inp in content['inputs']:
+                inpsize = inp['parameters'].pop('binary_data_size')
+                inp['data'] = np.frombuffer(body[last:last + inpsize], dtype=np.uint8).tolist()
+                last+=inpsize
+            self._body = content
+        return self._body
+
+
+class BinaryTensorRoute(FastAPIRoute):
+    def get_route_handler(self):
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            request = BinaryTensorRequest(request.scope, request.receive)
+            return await original_route_handler(request)
+
+        return custom_route_handler
+
+
 
 class RESTServer:
     def __init__(self, data_plane: DataPlane, model_repository_extension, enable_docs_url=False):
@@ -105,7 +137,7 @@ class RESTServer:
                              v2_endpoints.model_ready, response_model=ModelReadyResponse, tags=["V2"]),
                 FastAPIRoute(r"v2/models/{model_name}/versions/{model_version}/ready",
                              v2_endpoints.model_ready, response_model=ModelReadyResponse, tags=["V2"]),
-                FastAPIRoute(r"/v2/models/{model_name}/infer",
+                BinaryTensorRoute(r"/v2/models/{model_name}/infer",
                              v2_endpoints.infer, methods=["POST"], response_model=InferenceResponse, tags=["V2"]),
                 FastAPIRoute(r"/v2/models/{model_name}/versions/{model_version}/infer",
                              v2_endpoints.infer, methods=["POST"], tags=["V2"], include_in_schema=False),
