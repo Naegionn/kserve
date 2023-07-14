@@ -54,11 +54,21 @@ class _NoSignalUvicornServer(uvicorn.Server):
 
 import json
 import numpy as np
+import gzip, zlib
 class BinaryTensorRequest(Request):
     async def body(self) -> bytes:
         if hasattr(self, "_body"):
             return self._body
         body = await super().body()
+
+        if "Content-Encoding" in self.headers:
+            if self.headers["Content-Encoding"] == "gzip":
+                body = gzip.decompress(body)
+            elif self.headers["Content-Encoding"] == "deflate":
+                body = zlib.decompress(body)
+            else:
+                raise Exception(('Unknown encoding', self.headers['Content-Encoding']))
+
         if 'inference-header-content-length' not in self.headers:
             self._body = body
         else:
