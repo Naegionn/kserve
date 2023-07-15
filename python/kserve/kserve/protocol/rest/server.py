@@ -83,13 +83,33 @@ class BinaryTensorRequest(Request):
         return self._body
 
 
+import numpy as np
+import time
+import gzip, zlib
 class BinaryTensorRoute(FastAPIRoute):
     def get_route_handler(self):
         original_route_handler = super().get_route_handler()
 
         async def custom_route_handler(request: Request) -> Response:
             request = BinaryTensorRequest(request.scope, request.receive)
-            return await original_route_handler(request)
+            now = time.time()
+            response = await original_route_handler(request)
+            print("Orig elapsed: ", time.time() - now)
+            now = time.time()
+
+            if "Accept-Encoding" in request.headers:
+                if request.headers["Accept-Encoding"] == "gzip":
+                    response.headers['content-encoding'] = 'gzip'
+                    response.body = gzip.compress(response.body)
+                elif request.headers["Accept-Encoding"] == "deflate":
+                    response.headers['content-encoding'] = 'deflate'
+                    response.body = zlib.compress(response.body)
+                else:
+                    raise Exception
+                response.headers['content-length'] = str(len(response.body))
+
+            print("New elapsed: ", time.time() - now)
+            return response
 
         return custom_route_handler
 
