@@ -33,6 +33,8 @@ from kserve.errors import InvalidInput, InferenceError, ModelNotFound, ModelNotR
     inference_error_handler, model_not_found_handler, model_not_ready_handler, not_implemented_error_handler, \
     generic_exception_handler
 from kserve.protocol.dataplane import DataPlane
+from starlette.responses import Response, BackgroundTask
+import typing
 
 
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -81,7 +83,7 @@ class BinaryTensorRequest(Request):
                 last+=inpsize
             self._body = content
         return self._body
-
+    
 
 import numpy as np
 import time
@@ -94,7 +96,7 @@ class BinaryTensorRoute(FastAPIRoute):
         async def custom_route_handler(request: Request) -> Response:
             request = BinaryTensorRequest(request.scope, request.receive)
             now = time.time()
-            response = await original_route_handler(request)
+            response: BinaryResponse = await original_route_handler(request)
             sys.stderr.write(f"Orig elapsed: {time.time() - now}")
             now = time.time()
 
@@ -114,7 +116,41 @@ class BinaryTensorRoute(FastAPIRoute):
 
         return custom_route_handler
 
+class BinaryResponse(Response):
+    media_type = "application/octet-stream"
 
+    def __init__(
+        self,
+        content: typing.Any,
+        status_code: int = 200,
+        headers: typing.Optional[typing.Dict[str, str]] = None,
+        media_type: typing.Optional[str] = None,
+        background: typing.Optional[BackgroundTask] = None,
+    ) -> None:
+        self.inference_header_length = 0 
+        super().__init__(content, status_code, headers, media_type, background)
+        self.raw_headers.append((b"inference-header-content-length", str(self.inference_header_length)))
+
+    def render(self, content: typing.Any) -> bytes:
+        binary_data = b''
+        outputs = content['outputs']
+        for output in outputs:
+            data = output.pop("data")
+            bdata = np.array(json.loads(data[0]), dtype=np.uint8).tobytes()
+            binary_data += bdata
+            if output['parameters'] is None:
+                output['parameters'] = {} 
+            output['parameters']['binary_data_size'] = len(bdata)
+        jdata = json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.inference_header_length = len(jdata)
+        return jdata + binary_data
+    
 
 class RESTServer:
     def __init__(self, data_plane: DataPlane, model_repository_extension, enable_docs_url=False):
@@ -169,7 +205,7 @@ class RESTServer:
                 FastAPIRoute(r"v2/models/{model_name}/versions/{model_version}/ready",
                              v2_endpoints.model_ready, response_model=ModelReadyResponse, tags=["V2"]),
                 BinaryTensorRoute(r"/v2/models/{model_name}/infer",
-                             v2_endpoints.infer, methods=["POST"], response_model=InferenceResponse, tags=["V2"]),
+                             v2_endpoints.infer, methods=["POST"], response_model=InferenceResponse, response_class=BinaryResponse, tags=["V2"]),
                 FastAPIRoute(r"/v2/models/{model_name}/versions/{model_version}/infer",
                              v2_endpoints.infer, methods=["POST"], tags=["V2"], include_in_schema=False),
                 FastAPIRoute(r"/v2/repository/models/{model_name}/load",
