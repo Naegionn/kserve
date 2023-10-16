@@ -136,11 +136,17 @@ class BinaryResponse(Response):
         outputs = content['outputs']
         for output in outputs:
             data = output.pop("data")
-            bdata = np.array(json.loads(data[0]), dtype=np.uint8).tobytes()
-            binary_data += bdata
-            if output['parameters'] is None:
-                output['parameters'] = {} 
-            output['parameters']['binary_data_size'] = len(bdata)
+            npdata = np.array(json.loads(data[0]), dtype=np.uint8)
+            if output['parameters'] is None \
+                    or 'binary_data_output' not in output['parameters'] \
+                    or output['parameters']['binary_data_output'] == False:
+                output['data'] = npdata.tolist()
+            else:
+                bdata = npdata.tobytes()
+                binary_data += bdata
+                if output['parameters'] is None:
+                    output['parameters'] = {} 
+                output['parameters']['binary_data_size'] = len(bdata)
         jdata = json.dumps(
             content,
             ensure_ascii=False,
