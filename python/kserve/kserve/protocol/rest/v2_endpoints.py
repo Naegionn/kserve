@@ -41,7 +41,9 @@ class V2Endpoints:
         Returns:
             ServerMetadataResponse: Server metadata JSON object.
         """
-        return ServerMetadataResponse.parse_obj(self.dataplane.metadata())
+        response = ServerMetadataResponse.parse_obj(self.dataplane.metadata())
+        response.extensions.append('binary_tensor_data')
+        return response
 
     @staticmethod
     async def live() -> ServerLiveResponse:

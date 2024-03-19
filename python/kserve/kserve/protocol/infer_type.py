@@ -543,7 +543,8 @@ class InferResponse:
             infer_output_dict = {
                 "name": infer_output.name,
                 "shape": infer_output.shape,
-                "datatype": infer_output.datatype
+                "datatype": infer_output.datatype,
+                "parameters": infer_output.parameters,
             }
             if isinstance(infer_output.data, numpy.ndarray):
                 infer_output.set_data_from_numpy(infer_output.data, binary_data=False)
@@ -556,7 +557,8 @@ class InferResponse:
         res = {
             'id': self.id,
             'model_name': self.model_name,
-            'outputs': infer_outputs
+            'outputs': infer_outputs,
+            'parameters': self.parameters,
         }
         return res
 

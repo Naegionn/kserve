@@ -33,6 +33,8 @@ from kserve.errors import InvalidInput, InferenceError, ModelNotFound, ModelNotR
     inference_error_handler, model_not_found_handler, model_not_ready_handler, not_implemented_error_handler, \
     generic_exception_handler
 from kserve.protocol.dataplane import DataPlane
+from starlette.responses import Response, BackgroundTask
+import typing
 
 
 DATE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -52,6 +54,109 @@ class _NoSignalUvicornServer(uvicorn.Server):
     def install_signal_handlers(self) -> None:
         pass
 
+import json
+import numpy as np
+import gzip, zlib
+class BinaryTensorRequest(Request):
+    async def body(self) -> bytes:
+        if hasattr(self, "_body"):
+            return self._body
+        body = await super().body()
+
+        if "Content-Encoding" in self.headers:
+            if self.headers["Content-Encoding"] == "gzip":
+                body = gzip.decompress(body)
+            elif self.headers["Content-Encoding"] == "deflate":
+                body = zlib.decompress(body)
+            else:
+                raise Exception(('Unknown encoding', self.headers['Content-Encoding']))
+
+        if 'inference-header-content-length' not in self.headers:
+            self._body = body
+        else:
+            infheadercontlen = int(self.headers['inference-header-content-length'])
+            content = json.loads(body[:infheadercontlen])
+            last = infheadercontlen
+            for inp in content['inputs']:
+                inpsize = inp['parameters'].pop('binary_data_size')
+                inp['data'] = np.frombuffer(body[last:last + inpsize], dtype=np.uint8).tolist()
+                last+=inpsize
+            self._body = content
+        return self._body
+    
+
+import numpy as np
+import time
+import gzip, zlib
+import sys
+class BinaryTensorRoute(FastAPIRoute):
+    def get_route_handler(self):
+        original_route_handler = super().get_route_handler()
+
+        async def custom_route_handler(request: Request) -> Response:
+            request = BinaryTensorRequest(request.scope, request.receive)
+            now = time.time()
+            response: BinaryResponse = await original_route_handler(request)
+            sys.stderr.write(f"Orig elapsed: {time.time() - now}")
+            now = time.time()
+
+            if "Accept-Encoding" in request.headers:
+                if request.headers["Accept-Encoding"] == "gzip":
+                    response.headers['content-encoding'] = 'gzip'
+                    response.body = gzip.compress(response.body)
+                elif request.headers["Accept-Encoding"] == "deflate":
+                    response.headers['content-encoding'] = 'deflate'
+                    response.body = zlib.compress(response.body)
+                else:
+                    raise Exception
+                response.headers['content-length'] = str(len(response.body))
+
+            sys.stderr.write(f"New elapsed: {time.time() - now}")
+            return response
+
+        return custom_route_handler
+
+class BinaryResponse(Response):
+    media_type = "application/octet-stream"
+
+    def __init__(
+        self,
+        content: typing.Any,
+        status_code: int = 200,
+        headers: typing.Optional[typing.Dict[str, str]] = None,
+        media_type: typing.Optional[str] = None,
+        background: typing.Optional[BackgroundTask] = None,
+    ) -> None:
+        self.inference_header_length = 0 
+        super().__init__(content, status_code, headers, media_type, background)
+        self.raw_headers.append((b"inference-header-content-length", str(self.inference_header_length)))
+
+    def render(self, content: typing.Any) -> bytes:
+        binary_data = b''
+        outputs = content['outputs']
+        for output in outputs:
+            data = output.pop("data")
+            npdata = np.array(json.loads(data[0]), dtype=np.uint8)
+            if output['parameters'] is None \
+                    or 'binary_data_output' not in output['parameters'] \
+                    or output['parameters']['binary_data_output'] == False:
+                output['data'] = npdata.tolist()
+            else:
+                bdata = npdata.tobytes()
+                binary_data += bdata
+                if output['parameters'] is None:
+                    output['parameters'] = {} 
+                output['parameters']['binary_data_size'] = len(bdata)
+        jdata = json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.inference_header_length = len(jdata)
+        return jdata + binary_data
+    
 
 class RESTServer:
     def __init__(self, data_plane: DataPlane, model_repository_extension, enable_docs_url=False):
@@ -105,8 +210,8 @@ class RESTServer:
                              v2_endpoints.model_ready, response_model=ModelReadyResponse, tags=["V2"]),
                 FastAPIRoute(r"v2/models/{model_name}/versions/{model_version}/ready",
                              v2_endpoints.model_ready, response_model=ModelReadyResponse, tags=["V2"]),
-                FastAPIRoute(r"/v2/models/{model_name}/infer",
-                             v2_endpoints.infer, methods=["POST"], response_model=InferenceResponse, tags=["V2"]),
+                BinaryTensorRoute(r"/v2/models/{model_name}/infer",
+                             v2_endpoints.infer, methods=["POST"], response_model=InferenceResponse, response_class=BinaryResponse, tags=["V2"]),
                 FastAPIRoute(r"/v2/models/{model_name}/versions/{model_version}/infer",
                              v2_endpoints.infer, methods=["POST"], tags=["V2"], include_in_schema=False),
                 FastAPIRoute(r"/v2/repository/models/{model_name}/load",
